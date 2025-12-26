@@ -1,151 +1,125 @@
-import xml.etree.ElementTree as ET
+import re
 import csv
-import sys
 from datetime import datetime
 
-def parse_event_xml(xml_string):
+def parse_event_logs(input_file, output_file):
     """
-    Parse Windows Event Log XML and extract relevant fields.
+    Parse Windows Security Event logs and extract key fields to CSV.
     
     Args:
-        xml_string: XML string containing Windows Event data
-        
-    Returns:
-        Dictionary with parsed event data
+        input_file: Path to input file containing event logs
+        output_file: Path to output CSV file for results
     """
-    # Parse XML
-    root = ET.fromstring(xml_string)
     
-    # Define namespace
-    ns = {'evt': 'http://schemas.microsoft.com/win/2004/08/events/event'}
+    with open(input_file, 'r', encoding='utf-8') as f:
+        content = f.read()
     
-    # Extract System data
-    system = root.find('evt:System', ns)
-    time_created = system.find('evt:TimeCreated', ns).get('SystemTime')
-    computer = system.find('evt:Computer', ns).text
+    # Split content by "Log Name:" to separate individual events
+    # This regex finds "Log Name:" at the start of a line
+    events = re.split(r'\n(?=Log Name:)', content)
+    events = [e.strip() for e in events if e.strip()]  # Remove empty entries
     
-    # Convert ISO timestamp to readable format
-    eventdate = datetime.fromisoformat(time_created.replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M:%S')
+    parsed_events = []
     
-    # Extract EventData
-    event_data = root.find('evt:EventData', ns)
-    data_dict = {}
+    for event in events:
+        event_data = {}
+        
+        # Extract Date
+        date_match = re.search(r'Date:\s+(.+?)(?:\n|$)', event)
+        if date_match:
+            event_data['eventdate'] = date_match.group(1).strip()
+        else:
+            event_data['eventdate'] = ''
+        
+        # Extract Computer (Hostname)
+        hostname_match = re.search(r'Computer:\s+(.+?)(?:\n|$)', event)
+        if hostname_match:
+            event_data['hostname'] = hostname_match.group(1).strip()
+        else:
+            event_data['hostname'] = ''
+        
+        # Extract User (Account Name from Creator Subject)
+        user_match = re.search(r'Creator Subject:.*?Account Name:\s+(.+?)(?:\n|$)', event, re.DOTALL)
+        if user_match:
+            event_data['user'] = user_match.group(1).strip()
+        else:
+            event_data['user'] = ''
+        
+        # Extract Process ID (New Process ID)
+        pid_match = re.search(r'New Process ID:\s+(.+?)(?:\n|$)', event)
+        if pid_match:
+            event_data['processid'] = pid_match.group(1).strip()
+        else:
+            event_data['processid'] = ''
+        
+        # Extract Image (New Process Name)
+        image_match = re.search(r'New Process Name:\s+(.+?)(?:\n|$)', event)
+        if image_match:
+            event_data['image'] = image_match.group(1).strip()
+        else:
+            event_data['image'] = ''
+        
+        # Extract Process Command Line
+        cmdline_match = re.search(r'Process Command Line:\s+(.+?)(?:\n\n|$)', event, re.DOTALL)
+        if cmdline_match:
+            # Clean up the command line - remove extra whitespace and newlines
+            cmdline = cmdline_match.group(1).strip()
+            cmdline = ' '.join(cmdline.split())
+            event_data['processcommandline'] = cmdline
+        else:
+            event_data['processcommandline'] = ''
+        
+        # Extract Hashes (if present)
+        hash_match = re.search(r'Hashes:\s+(.+?)(?:\n|$)', event)
+        if hash_match:
+            event_data['hashes'] = hash_match.group(1).strip()
+        else:
+            event_data['hashes'] = ''
+        
+        if any(event_data.values()):  # Only add if we extracted some data
+            parsed_events.append(event_data)
     
-    for data in event_data.findall('evt:Data', ns):
-        name = data.get('Name')
-        value = data.text if data.text else ''
-        data_dict[name] = value
+    # Define CSV columns
+    fieldnames = ['eventdate', 'hostname', 'user', 'processid', 'image', 'processcommandline', 'hashes']
     
-    # Map to CSV format
-    csv_data = {
-        'eventdate': eventdate,
-        'hostname': computer,
-        'user': data_dict.get('SubjectUserName', ''),
-        'processid': data_dict.get('NewProcessId', ''),
-        'image': data_dict.get('NewProcessName', ''),
-        'processcommandline': data_dict.get('CommandLine', ''),
-        'hashes': ''  # Not present in Event ID 4688 by default
-    }
+    # Write to CSV file
+    with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(parsed_events)
     
-    return csv_data
+    # Print to console in CSV format
+    print(','.join(fieldnames))
+    for event in parsed_events:
+        row = []
+        for field in fieldnames:
+            value = event.get(field, '')
+            # Quote fields that contain commas or quotes
+            if ',' in value or '"' in value:
+                value = f'"{value.replace(chr(34), chr(34)+chr(34))}"'
+            row.append(value)
+        print(','.join(row))
+    
+    print(f"\n{'='*80}")
+    print(f"Successfully parsed {len(parsed_events)} events")
+    print(f"Results saved to: {output_file}")
+    print(f"{'='*80}")
+    
+    return parsed_events
 
-def xml_to_csv(xml_input_file, output_csv='output.csv'):
-    """
-    Convert Windows Event XML to CSV file.
+
+if __name__ == "__main__":
+    # Configuration
+    input_file = "event_logs.txt"  # Change this to your input file path
+    output_file = "parsed_events.csv"  # Change this to your desired output CSV file
     
-    Args:
-        xml_input_file: Path to XML file containing event data
-        output_csv: Output CSV file path
-    """
     try:
-        # Read XML from file
-        with open(xml_input_file, 'r', encoding='utf-8') as f:
-            xml_string = f.read()
-        
-        # Check if file is empty or has invalid content
-        if not xml_string.strip():
-            print("Error: XML file is empty")
-            sys.exit(1)
-        
-        # Remove leading dashes from XML lines (common in some exports)
-        # This handles cases like "- <Event>" or " - <System>"
-        lines = xml_string.split('\n')
-        cleaned_lines = []
-        for line in lines:
-            # Remove leading "- " or " - " from each line
-            cleaned_line = line.lstrip()
-            if cleaned_line.startswith('- '):
-                cleaned_line = cleaned_line[2:]
-            cleaned_lines.append(cleaned_line)
-        xml_string = '\n'.join(cleaned_lines)
-        
-        # Check if it's a multi-event XML (wrapped in root element)
-        if not xml_string.strip().startswith('<Event'):
-            # Try to wrap it or find Event elements
-            try:
-                # Parse as-is first
-                root = ET.fromstring(xml_string)
-                # Find all Event elements
-                events = root.findall('.//{http://schemas.microsoft.com/win/2004/08/events/event}Event')
-                if not events:
-                    events = root.findall('.//Event')
-                if events:
-                    xml_string = ET.tostring(events[0], encoding='unicode')
-            except:
-                pass
-        
-        # Parse the XML
-        csv_data = parse_event_xml(xml_string)
-        
-        # Write to CSV
-        fieldnames = ['eventdate', 'hostname', 'user', 'processid', 'image', 'processcommandline', 'hashes']
-        
-        with open(output_csv, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerow(csv_data)
-        
-        print(f"✓ CSV file created: {output_csv}")
-        print(f"\nParsed data:")
-        for key, value in csv_data.items():
-            print(f"  {key}: {value}")
-        
-        return csv_data
-    
+        parsed_events = parse_event_logs(input_file, output_file)
+        print(f"\nTotal events parsed: {len(parsed_events)}")
     except FileNotFoundError:
-        print(f"Error: File '{xml_input_file}' not found.")
-        sys.exit(1)
-    except ET.ParseError as e:
-        print(f"Error: Failed to parse XML - {e}")
-        print("\nPlease check that your XML file:")
-        print("  1. Starts with <Event xmlns=...>")
-        print("  2. Has proper XML structure")
-        print("  3. Is encoded in UTF-8")
-        print("\nFirst 200 characters of file:")
-        try:
-            with open(xml_input_file, 'r', encoding='utf-8') as f:
-                print(repr(f.read(200)))
-        except:
-            pass
-        sys.exit(1)
+        print(f"Error: Input file '{input_file}' not found.")
+        print("Please create the file and paste your event logs into it.")
     except Exception as e:
         print(f"Error: {e}")
-        sys.exit(1)
-
-# Main execution
-if __name__ == "__main__":
-    # Default input file
-    input_file = 'xmldata'
-    output_file = 'output.csv'
-    
-    # Check for command line arguments
-    if len(sys.argv) > 1:
-        input_file = sys.argv[1]
-    if len(sys.argv) > 2:
-        output_file = sys.argv[2]
-    
-    print(f"Reading XML from: {input_file}")
-    print(f"Writing CSV to: {output_file}\n")
-    
-    # Convert XML to CSV
-    xml_to_csv(input_file, output_file)
+        import traceback
+        traceback.print_exc()
